@@ -1,0 +1,43 @@
+# Copy to weights.toml, edit, and pass with --weights. Recompute any time with
+# `jev-eval report results.jsonl --weights weights.toml` (no API calls).
+#
+# weight: how much the dimension counts toward the composite (0 = report only).
+# target: for Score dimensions, the level (0, 1, or 2) that counts as best. A text's goodness on
+#         that dimension falls off linearly with distance from the target.
+
+[dimensions.warmth]
+weight = 1
+target = 2      # 0 cold, 1 matter-of-fact, 2 warm
+
+[dimensions.formality]
+weight = 0      # set > 0 once you know the voice you want
+target = 1      # 0 casual, 1 conversational, 2 formal
+
+[dimensions.lectures]
+weight = 1
+
+[dimensions.talks_down]
+weight = 1
+
+[dimensions.unneeded_apology]
+weight = 0.5
+
+[dimensions.excess_disclaimers]
+weight = 0.5
+
+[dimensions.excess_hedging]
+weight = 0.5
+
+[dimensions.answer_up_front]
+weight = 1
+
+[dimensions.conciseness]
+weight = 1
+target = 2
+
+[dimensions.easy_to_follow]
+weight = 1.5
+target = 2
+
+[dimensions.formatting]
+weight = 0.5
