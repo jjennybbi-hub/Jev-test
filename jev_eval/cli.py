@@ -1,8 +1,9 @@
-"""jev-eval: score LLM responses on tone and clarity with TypeSafe's Jev."""
+"""jev-eval: score LLM responses on tone and clarity, offline with simple rules (free) or with TypeSafe's Jev."""
 
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient, TypeSafeError
@@ -11,6 +12,7 @@ from jev_eval import render
 from jev_eval.evaluate import build_payload, evaluate_all
 from jev_eval.inputs import InputError, load_records
 from jev_eval.questions import DIMENSIONS
+from jev_eval.rules import evaluate_one_rules
 from jev_eval.scorecard import load_weights, score_row
 
 FORMATS = {"table": render.table, "csv": render.to_csv, "json": render.to_json}
@@ -40,10 +42,16 @@ def _parser() -> argparse.ArgumentParser:
         p.add_argument("--format", choices=FORMATS, default="table")
         p.add_argument("--sort", help="sort by 'composite' or a dimension key (best first)")
 
-    run = sub.add_parser("run", help="evaluate texts with Jev, save raw answers, print the scorecard")
+    run = sub.add_parser("run", help="evaluate texts, save raw answers, print the scorecard")
     add_input(run)
+    run.add_argument(
+        "--engine",
+        choices=["rules", "jev"],
+        default="rules",
+        help="rules: free, offline word/count checks (default). jev: TypeSafe's API; needs TYPESAFE_API_KEY and may cost money",
+    )
     run.add_argument("-o", "--output", type=Path, default=Path("results.jsonl"), help="raw answers (default: results.jsonl)")
-    run.add_argument("--model", help="model name (default: the SDK's default, or TYPESAFE_DEFAULT_MODEL)")
+    run.add_argument("--model", help="jev engine only: model name (default: the SDK's default, or TYPESAFE_DEFAULT_MODEL)")
     run.add_argument("--concurrency", type=int, default=4)
     add_report_options(run)
     run.set_defaults(handler=_run)
@@ -53,7 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     add_report_options(report)
     report.set_defaults(handler=_report)
 
-    payload = sub.add_parser("payload", help="print the exact request body for each text, without sending it")
+    payload = sub.add_parser("payload", help="jev engine: print the exact API request for each text, without sending it")
     add_input(payload)
     payload.add_argument("--model")
     payload.set_defaults(handler=_payload)
@@ -67,14 +75,19 @@ def _load(args: argparse.Namespace):
 def _run(args: argparse.Namespace) -> int:
     records = _load(args)
     weights = load_weights(args.weights)  # fail on a bad config before spending API calls
-    try:
-        client = TypeSafeClient()
-    except TypeSafeError as e:
-        print(f"error: {e} (set TYPESAFE_API_KEY)", file=sys.stderr)
-        return 2
+    if args.engine == "rules":
+        client = nullcontext()
+        results_iter = map(evaluate_one_rules, records)
+    else:
+        try:
+            client = TypeSafeClient()
+        except TypeSafeError as e:
+            print(f"error: {e} (set TYPESAFE_API_KEY)", file=sys.stderr)
+            return 2
+        results_iter = evaluate_all(client, records, model=args.model, concurrency=args.concurrency)
     results = []
     with client, args.output.open("w", encoding="utf-8") as out:
-        for n, result in enumerate(evaluate_all(client, records, model=args.model, concurrency=args.concurrency), 1):
+        for n, result in enumerate(results_iter, 1):
             out.write(json.dumps(result) + "\n")
             out.flush()
             status = "ERROR " + result["error"] if "error" in result else "ok"

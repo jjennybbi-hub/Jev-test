@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from jev_eval.questions import DIMENSIONS, NO_THRESHOLD, QUESTIONS_VERSION, YES_THRESHOLD, Dimension
+from jev_eval.rules import RULES_VERSION
 
 DIMENSION_BY_KEY = {d.key: d for d in DIMENSIONS}
 
@@ -67,11 +68,13 @@ class Cell:
     verdict: str | None = None  # Noul yes/no/unsure, Score top level, Choice top option
     split: bool = False  # Score probability is two-peaked; the expected value hides that
     levels: int | None = None
+    note: str | None = None  # what a rule found (rules engine only)
 
 
 @dataclass
 class Row:
     id: str
+    engine: str = "jev"
     error: str | None = None
     composite: float | None = None
     cells: dict[str, Cell] = field(default_factory=dict)
@@ -87,7 +90,9 @@ def noul_verdict(p: float) -> Verdict:
 
 
 def score_row(result: dict[str, Any], weights: dict[str, DimensionWeight]) -> Row:
-    row = Row(id=result["id"], stale=result.get("questions_version") != QUESTIONS_VERSION)
+    engine = result.get("engine", "jev")
+    current = RULES_VERSION if engine == "rules" else QUESTIONS_VERSION
+    row = Row(id=result["id"], engine=engine, stale=result.get("questions_version") != current)
     if "error" in result:
         row.error = result["error"]
         return row
@@ -97,6 +102,7 @@ def score_row(result: dict[str, Any], weights: dict[str, DimensionWeight]) -> Ro
         if answer is None:
             continue
         cell = _cell(dim, answer, weights[dim.key])
+        cell.note = result.get("notes", {}).get(dim.key)
         if dim.applies_if:
             gate = answers.get(dim.applies_if)
             gate_verdict = noul_verdict(gate["noul"]) if gate else "unsure"

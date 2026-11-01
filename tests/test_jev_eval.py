@@ -9,6 +9,7 @@ from jev_eval import cli
 from jev_eval.evaluate import build_payload, evaluate_all
 from jev_eval.inputs import InputError, Record, load_records
 from jev_eval.questions import DIMENSIONS, QUESTIONS_VERSION, all_questions
+from jev_eval.rules import evaluate_one_rules
 from jev_eval.scorecard import DimensionWeight, load_weights, score_row
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
@@ -205,7 +206,7 @@ def test_stale_question_version_flagged():
 def test_cli_run_then_report(tmp_path, monkeypatch, capsys, fmt):
     monkeypatch.setattr(cli, "TypeSafeClient", lambda: fake_client())
     out = tmp_path / "results.jsonl"
-    assert cli.main(["run", str(EXAMPLES / "sample.jsonl"), "-o", str(out), "--format", fmt]) == 0
+    assert cli.main(["run", str(EXAMPLES / "sample.jsonl"), "--engine", "jev", "-o", str(out), "--format", fmt]) == 0
     assert len(out.read_text().splitlines()) == 5
     first = capsys.readouterr().out
     assert "preachy" in first
@@ -216,7 +217,7 @@ def test_cli_run_then_report(tmp_path, monkeypatch, capsys, fmt):
 def test_cli_run_exits_nonzero_on_api_errors(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "TypeSafeClient", lambda: fake_client(status=500))
     out = tmp_path / "results.jsonl"
-    assert cli.main(["run", str(EXAMPLES / "sample.jsonl"), "-o", str(out)]) == 1
+    assert cli.main(["run", str(EXAMPLES / "sample.jsonl"), "--engine", "jev", "-o", str(out)]) == 1
     assert "ERROR" in capsys.readouterr().out
 
 
@@ -230,3 +231,55 @@ def test_cli_bad_sort_key(tmp_path, capsys):
     path = tmp_path / "r.jsonl"
     path.write_text(json.dumps(result(GOOD_ANSWERS)) + "\n")
     assert cli.main(["report", str(path), "--sort", "nope"]) == 2
+
+
+# --- rules engine (offline) -------------------------------------------------------------------
+
+
+def rules_row(prompt, response):
+    return score_row(evaluate_one_rules(Record(id="r", user_prompt=prompt, response=response)), load_weights(None))
+
+
+def test_rules_flags_apology_disclaimer_and_preamble():
+    row = rules_row(
+        "What is 3 miles in km?",
+        "Great question! I'm sorry, I'm not a certified expert, but it's about 4.83 km. I hope this helps!",
+    )
+    assert row.cells["unneeded_apology"].verdict == "yes"
+    assert row.cells["excess_disclaimers"].verdict == "yes"
+    assert row.cells["answer_up_front"].verdict == "no" and row.cells["answer_up_front"].applies is True
+    assert row.cells["conciseness"].value < 2
+    assert "sorry" in row.cells["unneeded_apology"].note
+
+
+def test_rules_clean_answer_scores_full_marks():
+    row = rules_row("What port does Postgres use?", "5432. You can change it in postgresql.conf.")
+    assert row.composite == 100.0
+    assert not any(row.cells[k].verdict == "yes" for k in ("unneeded_apology", "excess_disclaimers", "excess_hedging"))
+
+
+def test_rules_skip_what_they_cannot_judge_and_gate_non_questions():
+    row = rules_row("Write a two-line poem about autumn.", "Leaves let go without a sound,\nand gold comes gently to the ground.")
+    assert {"warmth", "lectures", "talks_down"}.isdisjoint(row.cells)
+    assert row.cells["answer_up_front"].applies is False
+    assert row.engine == "rules" and not row.stale
+
+
+def test_rules_hedging_and_formatting():
+    hedgy = rules_row("Is Paris the capital of France?", "It might possibly be Paris, perhaps, though it could be argued otherwise.")
+    assert hedgy.cells["excess_hedging"].verdict == "yes"
+    heavy = rules_row("Hi?", "# Answer\n\n- **Yes**\n- **Indeed**\n- **Sure**")
+    assert heavy.cells["formatting"].verdict == "over_formatted"
+    steps = rules_row("How do I make tea?", "First boil water. Then add the tea bag. Next wait three minutes. Finally remove the bag.")
+    assert steps.cells["formatting"].verdict == "under_formatted"
+
+
+def test_cli_defaults_to_rules_without_api_key(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "TypeSafeClient", lambda: pytest.fail("rules engine must not create an API client"))
+    out = tmp_path / "results.jsonl"
+    assert cli.main(["run", str(EXAMPLES / "sample.jsonl"), "-o", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "Why (what the rules found)" in printed and "Great question" in printed
+    assert cli.main(["report", str(out), "--format", "csv"]) == 0
+    assert "unneeded_apology_note" in capsys.readouterr().out
